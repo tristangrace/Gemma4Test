@@ -1,0 +1,1072 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemma 4 Vision - Webcam Describer</title>
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #0a0a0f;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    header {
+      padding: 1.5rem;
+      text-align: center;
+      width: 100%;
+      background: linear-gradient(180deg, #14141f 0%, transparent 100%);
+    }
+
+    header h1 { font-size: 1.5rem; font-weight: 600; color: #c4b5fd; }
+    header p { font-size: 0.85rem; color: #666; margin-top: 0.25rem; }
+
+    .main {
+      display: flex;
+      gap: 1.5rem;
+      padding: 1rem 1.5rem 1.5rem;
+      width: 100%;
+      max-width: 1400px;
+      flex: 1;
+    }
+
+    .camera-panel {
+      flex: 1.2;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .video-container {
+      position: relative;
+      background: #111;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #222;
+      aspect-ratio: 4/3;
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    canvas#overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    canvas#snapshot { display: none; }
+
+    .video-container .status-dot {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #444;
+      z-index: 2;
+    }
+
+    .video-container .status-dot.live { background: #ef4444; box-shadow: 0 0 8px #ef444488; }
+
+    .video-container .face-status {
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      font-size: 0.7rem;
+      color: #888;
+      background: rgba(0,0,0,0.6);
+      padding: 2px 8px;
+      border-radius: 4px;
+      z-index: 2;
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 0.6rem 1.25rem;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    button:hover { background: #252540; border-color: #555; }
+
+    button.primary {
+      background: #5b21b6;
+      border-color: #7c3aed;
+      color: white;
+      font-weight: 600;
+    }
+
+    button.primary:hover { background: #6d28d9; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.danger { border-color: #7f1d1d; color: #fca5a5; }
+    button.danger:hover { background: #2a1015; }
+
+    button.register {
+      background: #065f46;
+      border-color: #10b981;
+      color: #a7f3d0;
+    }
+    button.register:hover { background: #047857; }
+
+    .auto-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-left: auto;
+      font-size: 0.85rem;
+      color: #888;
+    }
+
+    .auto-toggle input[type="checkbox"] { accent-color: #7c3aed; }
+
+    .auto-toggle select {
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #e0e0e0;
+      padding: 0.3rem 0.5rem;
+      font-size: 0.8rem;
+    }
+
+    .right-panels {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .panel-header h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #a78bfa;
+    }
+
+    .faces-panel {
+      background: #111118;
+      border: 1px solid #222;
+      border-radius: 12px;
+      padding: 1rem;
+    }
+
+    .face-db {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 0.75rem;
+    }
+
+    .face-db .face-card {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #1a1a2e;
+      border: 1px solid #2a2a40;
+      border-radius: 8px;
+      padding: 0.4rem 0.75rem;
+    }
+
+    .face-card canvas {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      object-fit: cover;
+    }
+
+    .face-card .name {
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+
+    .face-card .remove-btn {
+      background: none;
+      border: none;
+      color: #666;
+      cursor: pointer;
+      font-size: 0.8rem;
+      padding: 0 0.25rem;
+    }
+
+    .face-card .remove-btn:hover { color: #fca5a5; }
+
+    .face-db-empty {
+      font-size: 0.8rem;
+      color: #444;
+      font-style: italic;
+      margin-top: 0.5rem;
+    }
+
+    .description-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .description-box {
+      flex: 1;
+      background: #111118;
+      border: 1px solid #222;
+      border-radius: 12px;
+      padding: 1.25rem;
+      overflow-y: auto;
+      font-size: 0.95rem;
+      line-height: 1.7;
+      min-height: 200px;
+    }
+
+    .description-box .placeholder { color: #444; font-style: italic; }
+
+    .description-box .entry {
+      padding: 0.75rem 0;
+      border-bottom: 1px solid #1a1a25;
+    }
+
+    .description-box .entry:last-child { border-bottom: none; }
+
+    .description-box .entry .time {
+      font-size: 0.75rem;
+      color: #555;
+      margin-bottom: 0.25rem;
+    }
+
+    .description-box .entry .faces-detected {
+      font-size: 0.75rem;
+      color: #10b981;
+      margin-bottom: 0.35rem;
+    }
+
+    .description-box .entry.streaming .cursor {
+      display: inline-block;
+      width: 6px;
+      height: 1em;
+      background: #7c3aed;
+      margin-left: 2px;
+      animation: blink 0.8s infinite;
+      vertical-align: text-bottom;
+    }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .settings-bar {
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.8rem;
+      color: #555;
+      width: 100%;
+      max-width: 1400px;
+    }
+
+    .settings-bar label { color: #777; }
+
+    .settings-bar input[type="text"] {
+      background: #111;
+      border: 1px solid #282828;
+      border-radius: 6px;
+      padding: 0.35rem 0.6rem;
+      color: #ccc;
+      font-size: 0.8rem;
+      font-family: monospace;
+      width: 280px;
+    }
+
+    .connection-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .connection-status .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #444;
+    }
+
+    .connection-status .dot.ok { background: #22c55e; }
+    .connection-status .dot.err { background: #ef4444; }
+
+    /* Registration modal */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-backdrop.open { display: flex; }
+
+    .modal {
+      background: #14141f;
+      border: 1px solid #333;
+      border-radius: 16px;
+      padding: 1.5rem;
+      width: 360px;
+      text-align: center;
+    }
+
+    .modal h3 {
+      font-size: 1.1rem;
+      color: #c4b5fd;
+      margin-bottom: 1rem;
+    }
+
+    .modal canvas {
+      width: 150px;
+      height: 150px;
+      border-radius: 50%;
+      border: 3px solid #333;
+      margin-bottom: 1rem;
+    }
+
+    .modal input[type="text"] {
+      width: 100%;
+      padding: 0.6rem 0.8rem;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-size: 1rem;
+      margin-bottom: 1rem;
+      text-align: center;
+    }
+
+    .modal .modal-btns {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: center;
+    }
+
+    .modal .modal-btns button { flex: 1; }
+
+    .modal .no-face { color: #fca5a5; font-size: 0.85rem; margin-bottom: 1rem; }
+
+    .prompt-bar {
+      padding: 0 1.5rem 0.5rem;
+      width: 100%;
+      max-width: 1400px;
+    }
+
+    .prompt-bar details {
+      background: #111118;
+      border: 1px solid #222;
+      border-radius: 10px;
+      padding: 0;
+    }
+
+    .prompt-bar summary {
+      padding: 0.5rem 0.75rem;
+      font-size: 0.8rem;
+      color: #777;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .prompt-bar summary:hover { color: #aaa; }
+
+    .prompt-fields {
+      padding: 0.5rem 0.75rem 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .prompt-fields label {
+      font-size: 0.75rem;
+      color: #666;
+    }
+
+    .prompt-fields textarea {
+      width: 100%;
+      background: #0a0a0f;
+      border: 1px solid #282828;
+      border-radius: 6px;
+      padding: 0.5rem 0.6rem;
+      color: #ccc;
+      font-size: 0.8rem;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 2.2rem;
+    }
+
+    .prompt-fields .hint {
+      font-size: 0.7rem;
+      color: #444;
+    }
+
+    @media (max-width: 768px) {
+      .main { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Gemma 4 Vision</h1>
+    <p>Webcam scene description with face recognition &mdash; powered by gemma-4-26b-a4b via LM Studio</p>
+  </header>
+
+  <div class="settings-bar">
+    <label>LM Studio API:</label>
+    <input type="text" id="apiUrl" value="http://127.0.0.1:8080/api/v1/chat">
+    <span class="connection-status">
+      <span class="dot" id="connDot"></span>
+      <span id="connLabel">Not checked</span>
+    </span>
+    <button onclick="checkConnection()" style="padding:0.3rem 0.75rem; font-size:0.8rem;">Test</button>
+  </div>
+
+  <div class="prompt-bar">
+    <details>
+      <summary>Prompt Settings</summary>
+      <div class="prompt-fields">
+        <label>Prompt when faces are detected:</label>
+        <textarea id="promptFaces" rows="2">{{faces}} Describe what's happening in this scene in 2-3 sentences, referring to known people by name.</textarea>
+        <div class="hint"><code>{{faces}}</code> is replaced with detected face info (names, positions, orientation). Remove it to skip face context.</div>
+
+        <label>Prompt when no faces are detected:</label>
+        <textarea id="promptNoFaces" rows="2">Briefly describe what you see in this image in 2-3 sentences.</textarea>
+      </div>
+    </details>
+  </div>
+
+  <div class="main">
+    <div class="camera-panel">
+      <div class="video-container">
+        <video id="webcam" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <canvas id="snapshot"></canvas>
+        <div class="status-dot" id="statusDot"></div>
+        <div class="face-status" id="faceStatus">Loading face models...</div>
+      </div>
+      <div class="controls">
+        <button class="primary" id="captureBtn" onclick="captureAndDescribe()" disabled>
+          Describe What You See
+        </button>
+        <button class="register" id="registerBtn" onclick="openRegister()" disabled>
+          Register Face
+        </button>
+        <button class="danger" id="stopBtn" onclick="stopStream()" style="display:none;">
+          Stop Camera
+        </button>
+        <div class="auto-toggle">
+          <input type="checkbox" id="autoMode" onchange="toggleAuto()">
+          <label for="autoMode">Auto every</label>
+          <select id="autoInterval">
+            <option value="3000">3s</option>
+            <option value="5000" selected>5s</option>
+            <option value="10000">10s</option>
+            <option value="15000">15s</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="right-panels">
+      <div class="faces-panel">
+        <div class="panel-header">
+          <h2>Known Faces</h2>
+          <button onclick="clearFaceDB()" style="padding:0.2rem 0.6rem; font-size:0.75rem;" class="danger">Clear All</button>
+        </div>
+        <div class="face-db" id="faceDB">
+          <div class="face-db-empty" id="faceDBEmpty">No faces registered. Click "Register Face" to add someone.</div>
+        </div>
+      </div>
+
+      <div class="description-panel">
+        <h2>Scene Description</h2>
+        <div class="description-box" id="output">
+          <div class="placeholder">Camera will start automatically. Click "Describe What You See" to send a frame to Gemma 4.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Registration modal -->
+  <div class="modal-backdrop" id="registerModal">
+    <div class="modal">
+      <h3>Register Face</h3>
+      <canvas id="faceCrop" width="150" height="150"></canvas>
+      <div class="no-face" id="regError" style="display:none;"></div>
+      <input type="text" id="regName" placeholder="Enter name..." autofocus>
+      <div class="modal-btns">
+        <button onclick="closeRegister()">Cancel</button>
+        <button class="primary" id="regSaveBtn" onclick="saveRegistration()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── Elements ──
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('snapshot');
+    const overlay = document.getElementById('overlay');
+    const output = document.getElementById('output');
+    const captureBtn = document.getElementById('captureBtn');
+    const registerBtn = document.getElementById('registerBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusDot = document.getElementById('statusDot');
+    const connDot = document.getElementById('connDot');
+    const connLabel = document.getElementById('connLabel');
+    const faceStatusEl = document.getElementById('faceStatus');
+    const faceDBEl = document.getElementById('faceDB');
+    const faceDBEmpty = document.getElementById('faceDBEmpty');
+
+    let stream = null;
+    let autoTimer = null;
+    let isProcessing = false;
+    let faceModelsReady = false;
+    let overlayLoop = null;
+
+    // ── Face Database (localStorage) ──
+    // Each entry: { name, descriptor: number[], thumbnail: dataUrl }
+    let faceDatabase = JSON.parse(localStorage.getItem('faceDB') || '[]');
+
+    function saveFaceDB() {
+      localStorage.setItem('faceDB', JSON.stringify(faceDatabase));
+    }
+
+    function renderFaceDB() {
+      // Remove old cards
+      faceDBEl.querySelectorAll('.face-card').forEach(c => c.remove());
+      faceDBEmpty.style.display = faceDatabase.length ? 'none' : '';
+
+      faceDatabase.forEach((entry, idx) => {
+        const card = document.createElement('div');
+        card.className = 'face-card';
+
+        const thumb = document.createElement('canvas');
+        thumb.width = 36; thumb.height = 36;
+        const img = new Image();
+        img.onload = () => {
+          const ctx = thumb.getContext('2d');
+          ctx.drawImage(img, 0, 0, 36, 36);
+        };
+        img.src = entry.thumbnail;
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = entry.name;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'remove-btn';
+        removeBtn.textContent = '\u00d7';
+        removeBtn.onclick = () => {
+          faceDatabase.splice(idx, 1);
+          saveFaceDB();
+          renderFaceDB();
+        };
+
+        card.append(thumb, name, removeBtn);
+        faceDBEl.appendChild(card);
+      });
+    }
+
+    function clearFaceDB() {
+      faceDatabase = [];
+      saveFaceDB();
+      renderFaceDB();
+    }
+
+    // ── Face API Setup ──
+    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
+
+    async function loadFaceModels() {
+      faceStatusEl.textContent = 'Loading face models...';
+      try {
+        await Promise.all([
+          faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+        ]);
+        faceModelsReady = true;
+        faceStatusEl.textContent = 'Face detection ready';
+        registerBtn.disabled = !stream;
+      } catch (err) {
+        faceStatusEl.textContent = 'Face model load failed';
+        console.error('Face model load error:', err);
+      }
+    }
+
+    // ── Head pose estimation from 68 landmarks ──
+    function estimateHeadPose(landmarks) {
+      const pts = landmarks.positions;
+
+      // Key landmarks:
+      // Nose tip: 30, Left jaw: 0, Right jaw: 16
+      // Left eye center: avg(36..41), Right eye center: avg(42..47)
+      const noseTip = pts[30];
+      const leftJaw = pts[0];
+      const rightJaw = pts[16];
+      const noseBridge = pts[27];
+
+      // Yaw: compare nose-to-jaw distances on each side
+      const distLeft = Math.hypot(noseTip.x - leftJaw.x, noseTip.y - leftJaw.y);
+      const distRight = Math.hypot(noseTip.x - rightJaw.x, noseTip.y - rightJaw.y);
+      const yawRatio = distLeft / (distLeft + distRight); // 0.5 = frontal
+
+      // Pitch: compare nose tip vs nose bridge vertical offset relative to face height
+      const faceHeight = Math.hypot(noseBridge.x - pts[8].x, noseBridge.y - pts[8].y); // chin = 8
+      const noseDropRatio = (noseTip.y - noseBridge.y) / faceHeight;
+
+      // Classify yaw
+      let yaw;
+      if (yawRatio < 0.3) yaw = 'facing right';       // strong turn to their right
+      else if (yawRatio < 0.42) yaw = 'angled right';  // slight turn
+      else if (yawRatio > 0.7) yaw = 'facing left';
+      else if (yawRatio > 0.58) yaw = 'angled left';
+      else yaw = 'facing forward';
+
+      // Classify pitch
+      let pitch;
+      if (noseDropRatio > 0.52) pitch = 'looking down';
+      else if (noseDropRatio < 0.32) pitch = 'looking up';
+      else pitch = null; // neutral, don't mention
+
+      // Build orientation string
+      const parts = [yaw];
+      if (pitch) parts.push(pitch);
+
+      return {
+        yaw,
+        pitch,
+        yawRatio: Math.round(yawRatio * 100) / 100,
+        orientation: parts.join(', ')
+      };
+    }
+
+    // ── Detect + identify faces in current video frame ──
+    async function detectAndIdentify() {
+      if (!faceModelsReady) return [];
+
+      const detections = await faceapi
+        .detectAllFaces(video)
+        .withFaceLandmarks()
+        .withFaceDescriptors();
+
+      if (!detections.length) return [];
+
+      return detections.map(det => {
+        const box = det.detection.box;
+        const descriptor = det.descriptor;
+        const pose = estimateHeadPose(det.landmarks);
+
+        // Find closest match in database
+        let bestMatch = { name: 'Unknown', distance: Infinity };
+        for (const entry of faceDatabase) {
+          const saved = new Float32Array(entry.descriptor);
+          const dist = faceapi.euclideanDistance(descriptor, saved);
+          if (dist < bestMatch.distance) {
+            bestMatch = { name: entry.name, distance: dist };
+          }
+        }
+
+        // Threshold: 0.6 is a good default for face-api.js
+        const identified = bestMatch.distance < 0.6;
+
+        return {
+          box,
+          name: identified ? bestMatch.name : 'Unknown',
+          distance: bestMatch.distance,
+          identified,
+          descriptor,
+          pose
+        };
+      });
+    }
+
+    // ── Draw bounding boxes on overlay ──
+    function drawOverlay(faces) {
+      const ctx = overlay.getContext('2d');
+      overlay.width = video.videoWidth;
+      overlay.height = video.videoHeight;
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+      for (const face of faces) {
+        const { box, name, identified, pose } = face;
+        const color = identified ? '#10b981' : '#666';
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(box.x, box.y, box.width, box.height);
+
+        // Name label (top)
+        const label = name;
+        ctx.font = 'bold 14px -apple-system, sans-serif';
+        const labelWidth = ctx.measureText(label).width;
+        ctx.fillStyle = color;
+        ctx.fillRect(box.x, box.y - 22, labelWidth + 10, 22);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(label, box.x + 5, box.y - 6);
+
+        // Orientation label (bottom)
+        if (pose) {
+          ctx.font = '12px -apple-system, sans-serif';
+          const orientText = pose.orientation;
+          const orientWidth = ctx.measureText(orientText).width;
+          const ox = box.x;
+          const oy = box.y + box.height + 2;
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillRect(ox, oy, orientWidth + 8, 18);
+          ctx.fillStyle = '#c4b5fd';
+          ctx.fillText(orientText, ox + 4, oy + 13);
+        }
+      }
+    }
+
+    // ── Live overlay loop (runs face detection continuously) ──
+    async function overlayDetectionLoop() {
+      if (!stream || !faceModelsReady) return;
+
+      try {
+        const faces = await detectAndIdentify();
+        drawOverlay(faces);
+        const count = faces.length;
+        const known = faces.filter(f => f.identified).length;
+        faceStatusEl.textContent = count
+          ? `${count} face${count > 1 ? 's' : ''} (${known} known)`
+          : 'No faces detected';
+      } catch (e) { /* skip frame errors */ }
+
+      overlayLoop = requestAnimationFrame(overlayDetectionLoop);
+    }
+
+    // ── Camera ──
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
+        });
+        video.srcObject = stream;
+        statusDot.classList.add('live');
+        captureBtn.disabled = false;
+        registerBtn.disabled = !faceModelsReady;
+        stopBtn.style.display = '';
+
+        video.onloadeddata = () => {
+          if (faceModelsReady) overlayDetectionLoop();
+        };
+      } catch (err) {
+        output.innerHTML = `<div class="entry"><p style="color:#fca5a5;">Camera access denied or unavailable: ${err.message}</p></div>`;
+      }
+    }
+
+    function stopStream() {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      if (overlayLoop) cancelAnimationFrame(overlayLoop);
+      statusDot.classList.remove('live');
+      captureBtn.disabled = true;
+      registerBtn.disabled = true;
+      stopBtn.style.display = 'none';
+      document.getElementById('autoMode').checked = false;
+      toggleAuto();
+    }
+
+    // ── Capture frame ──
+    function captureFrame() {
+      const scale = Math.min(1, 640 / video.videoWidth);
+      canvas.width = video.videoWidth * scale;
+      canvas.height = video.videoHeight * scale;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/jpeg', 0.6);
+    }
+
+    // ── Main: capture + identify + describe ──
+    async function captureAndDescribe() {
+      if (!stream || isProcessing) return;
+      isProcessing = true;
+      captureBtn.disabled = true;
+
+      const dataUrl = captureFrame();
+      const timestamp = new Date().toLocaleTimeString();
+
+      // Run face detection
+      let faces = [];
+      if (faceModelsReady) {
+        faces = await detectAndIdentify();
+      }
+
+      // Build face context for the prompt
+      const knownFaces = faces.filter(f => f.identified);
+      const unknownCount = faces.length - knownFaces.length;
+      let faceContext = '';
+
+      if (knownFaces.length > 0) {
+        const descriptions = knownFaces.map(f => {
+          const pos = describePosition(f.box);
+          const orient = f.pose ? `, ${f.pose.orientation}` : '';
+          return `${f.name} (${pos}${orient})`;
+        });
+        let ctx = `Known people in this image: ${descriptions.join('; ')}.`;
+        if (unknownCount > 0) {
+          ctx += ` There ${unknownCount === 1 ? 'is' : 'are'} also ${unknownCount} other unidentified ${unknownCount === 1 ? 'person' : 'people'}.`;
+        }
+        faceContext = ctx + ' ';
+      }
+
+      // Only use the faces prompt if we actually recognised someone
+      const prompt = knownFaces.length > 0
+        ? document.getElementById('promptFaces').value.replace('{{faces}}', faceContext)
+        : document.getElementById('promptNoFaces').value;
+
+      // Add streaming entry
+      const entry = document.createElement('div');
+      entry.className = 'entry streaming';
+
+      const faceLine = faces.length
+        ? `<div class="faces-detected">Detected: ${faces.map(f => `${f.name}${f.identified ? '' : ' (?)'} [${f.pose?.orientation || '?'}]`).join(', ')}</div>`
+        : '';
+
+      entry.innerHTML = `<div class="time">${timestamp}</div>${faceLine}<span class="text"></span><span class="cursor"></span>`;
+      output.prepend(entry);
+
+      const placeholder = output.querySelector('.placeholder');
+      if (placeholder) placeholder.remove();
+
+      const textSpan = entry.querySelector('.text');
+      const apiUrl = document.getElementById('apiUrl').value;
+
+      try {
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'google/gemma-4-26b-a4b',
+            input: [
+              { type: 'image', data_url: dataUrl },
+              { type: 'text', content: prompt }
+            ],
+            reasoning: 'off',
+            max_output_tokens: 200,
+            temperature: 0.4,
+            stream: true
+          })
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`API ${response.status}: ${errText.slice(0, 200)}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullText = '';
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+
+            try {
+              const json = JSON.parse(trimmed.slice(6));
+              if (json.type === 'message.delta' && json.content) {
+                fullText += json.content;
+                textSpan.textContent = fullText;
+                output.scrollTop = 0;
+              }
+            } catch (e) { /* skip */ }
+          }
+        }
+
+        entry.classList.remove('streaming');
+        entry.querySelector('.cursor')?.remove();
+
+      } catch (err) {
+        entry.classList.remove('streaming');
+        entry.querySelector('.cursor')?.remove();
+        textSpan.innerHTML = `<span style="color:#fca5a5;">Error: ${err.message}</span>`;
+      }
+
+      isProcessing = false;
+      captureBtn.disabled = !stream;
+    }
+
+    // Describe which part of the frame a face box is in
+    function describePosition(box) {
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+
+      const horizontal = cx < vw * 0.33 ? 'left' : cx > vw * 0.66 ? 'right' : 'center';
+      const vertical = cy < vh * 0.33 ? 'top' : cy > vh * 0.66 ? 'bottom' : 'middle';
+
+      if (horizontal === 'center' && vertical === 'middle') return 'center of frame';
+      if (vertical === 'middle') return `${horizontal} side`;
+      if (horizontal === 'center') return `${vertical} of frame`;
+      return `${vertical}-${horizontal}`;
+    }
+
+    // ── Registration ──
+    let pendingDescriptor = null;
+
+    async function openRegister() {
+      const modal = document.getElementById('registerModal');
+      const cropCanvas = document.getElementById('faceCrop');
+      const regError = document.getElementById('regError');
+      const regName = document.getElementById('regName');
+      const regSaveBtn = document.getElementById('regSaveBtn');
+
+      regError.style.display = 'none';
+      regName.value = '';
+      regSaveBtn.disabled = false;
+      pendingDescriptor = null;
+
+      if (!faceModelsReady) {
+        regError.textContent = 'Face models not loaded yet.';
+        regError.style.display = '';
+        modal.classList.add('open');
+        return;
+      }
+
+      // Detect faces
+      const detections = await faceapi
+        .detectAllFaces(video)
+        .withFaceLandmarks()
+        .withFaceDescriptors();
+
+      if (detections.length === 0) {
+        regError.textContent = 'No face detected. Make sure your face is visible and try again.';
+        regError.style.display = '';
+        const ctx = cropCanvas.getContext('2d');
+        ctx.clearRect(0, 0, 150, 150);
+        modal.classList.add('open');
+        return;
+      }
+
+      // Use the largest face (closest to camera)
+      const best = detections.reduce((a, b) =>
+        a.detection.box.area > b.detection.box.area ? a : b
+      );
+
+      pendingDescriptor = Array.from(best.descriptor);
+
+      // Draw face crop
+      const box = best.detection.box;
+      const pad = Math.max(box.width, box.height) * 0.3;
+      const sx = Math.max(0, box.x - pad);
+      const sy = Math.max(0, box.y - pad);
+      const sw = Math.min(video.videoWidth - sx, box.width + pad * 2);
+      const sh = Math.min(video.videoHeight - sy, box.height + pad * 2);
+
+      const ctx = cropCanvas.getContext('2d');
+      ctx.clearRect(0, 0, 150, 150);
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, 150, 150);
+
+      modal.classList.add('open');
+      setTimeout(() => regName.focus(), 100);
+    }
+
+    function closeRegister() {
+      document.getElementById('registerModal').classList.remove('open');
+      pendingDescriptor = null;
+    }
+
+    function saveRegistration() {
+      const name = document.getElementById('regName').value.trim();
+      if (!name) return;
+      if (!pendingDescriptor) return;
+
+      const cropCanvas = document.getElementById('faceCrop');
+      const thumbnail = cropCanvas.toDataURL('image/jpeg', 0.7);
+
+      faceDatabase.push({
+        name,
+        descriptor: pendingDescriptor,
+        thumbnail
+      });
+
+      saveFaceDB();
+      renderFaceDB();
+      closeRegister();
+    }
+
+    // ── Auto mode ──
+    function toggleAuto() {
+      const on = document.getElementById('autoMode').checked;
+      if (on && stream) {
+        const interval = parseInt(document.getElementById('autoInterval').value);
+        captureAndDescribe();
+        autoTimer = setInterval(() => {
+          if (!isProcessing) captureAndDescribe();
+        }, interval);
+      } else {
+        clearInterval(autoTimer);
+        autoTimer = null;
+      }
+    }
+
+    // ── Connection test ──
+    async function checkConnection() {
+      connDot.className = 'dot';
+      connLabel.textContent = 'Checking...';
+      try {
+        const base = document.getElementById('apiUrl').value.replace('/chat', '/models');
+        const res = await fetch(base);
+        if (res.ok) {
+          const data = await res.json();
+          const models = data.models?.map(m => m.key).join(', ') || data.data?.map(m => m.id).join(', ') || 'unknown';
+          connDot.className = 'dot ok';
+          connLabel.textContent = `Connected (${models})`;
+        } else {
+          throw new Error(res.status);
+        }
+      } catch (err) {
+        connDot.className = 'dot err';
+        connLabel.textContent = `Failed: ${err.message}`;
+      }
+    }
+
+    // ── Init ──
+    renderFaceDB();
+    startCamera();
+    loadFaceModels();
+  </script>
+</body>
+</html>
