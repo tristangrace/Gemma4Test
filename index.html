@@ -346,13 +346,48 @@
       margin-bottom: 1rem;
     }
 
-    .modal canvas {
-      width: 150px;
-      height: 150px;
-      border-radius: 50%;
-      border: 3px solid #333;
+    .reg-step-label {
+      font-size: 0.9rem;
+      color: #c4b5fd;
+      margin-bottom: 0.75rem;
+      min-height: 1.2em;
+    }
+
+    .reg-crops {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: center;
       margin-bottom: 1rem;
     }
+
+    .reg-crop-slot {
+      text-align: center;
+    }
+
+    .reg-crop-slot canvas {
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      border: 3px solid #333;
+    }
+
+    .reg-crop-slot canvas.active {
+      border-color: #7c3aed;
+      box-shadow: 0 0 10px #7c3aed66;
+    }
+
+    .reg-crop-slot canvas.done {
+      border-color: #10b981;
+    }
+
+    .reg-crop-label {
+      font-size: 0.7rem;
+      color: #555;
+      margin-top: 0.3rem;
+    }
+
+    .reg-crop-label.active { color: #c4b5fd; font-weight: 600; }
+    .reg-crop-label.done { color: #10b981; }
 
     .modal input[type="text"] {
       width: 100%;
@@ -520,17 +555,37 @@
   <div class="modal-backdrop" id="registerModal">
     <div class="modal">
       <h3>Register Face</h3>
-      <canvas id="faceCrop" width="150" height="150"></canvas>
+      <div class="reg-step-label" id="regStepLabel"></div>
+      <div class="reg-crops">
+        <div class="reg-crop-slot">
+          <canvas id="cropFront" width="100" height="100"></canvas>
+          <div class="reg-crop-label" id="labelFront">Front</div>
+        </div>
+        <div class="reg-crop-slot">
+          <canvas id="cropLeft" width="100" height="100"></canvas>
+          <div class="reg-crop-label" id="labelLeft">Left</div>
+        </div>
+        <div class="reg-crop-slot">
+          <canvas id="cropRight" width="100" height="100"></canvas>
+          <div class="reg-crop-label" id="labelRight">Right</div>
+        </div>
+      </div>
       <div class="no-face" id="regError" style="display:none;"></div>
-      <input type="text" id="regName" placeholder="Enter name..." autofocus>
+      <input type="text" id="regName" placeholder="Enter name..." autofocus style="display:none;">
       <div class="modal-btns">
         <button onclick="closeRegister()">Cancel</button>
-        <button class="primary" id="regSaveBtn" onclick="saveRegistration()">Save</button>
+        <button class="primary" id="regCaptureBtn" onclick="captureRegStep()">Capture</button>
+        <button class="primary" id="regSaveBtn" onclick="saveRegistration()" style="display:none;">Save</button>
       </div>
     </div>
   </div>
 
-  <script>
+  <script type="module">
+    // ── Import MediaPipe ──
+    const { FilesetResolver, FaceLandmarker } = await import(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs'
+    );
+
     // ── Elements ──
     const video = document.getElementById('webcam');
     const canvas = document.getElementById('snapshot');
@@ -549,11 +604,12 @@
     let stream = null;
     let autoTimer = null;
     let isProcessing = false;
-    let faceModelsReady = false;
+    let mediapipeReady = false;
+    let faceapiReady = false;
     let overlayLoop = null;
+    let faceLandmarker = null;
 
     // ── Face Database (localStorage) ──
-    // Each entry: { name, descriptor: number[], thumbnail: dataUrl }
     let faceDatabase = JSON.parse(localStorage.getItem('faceDB') || '[]');
 
     function saveFaceDB() {
@@ -561,7 +617,6 @@
     }
 
     function renderFaceDB() {
-      // Remove old cards
       faceDBEl.querySelectorAll('.face-card').forEach(c => c.remove());
       faceDBEmpty.style.display = faceDatabase.length ? 'none' : '';
 
@@ -602,62 +657,104 @@
       renderFaceDB();
     }
 
-    // ── Face API Setup ──
-    const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
-
-    async function loadFaceModels() {
-      faceStatusEl.textContent = 'Loading face models...';
+    // ── Load MediaPipe FaceLandmarker (detection + 478 landmarks) ──
+    async function loadMediaPipe() {
+      faceStatusEl.textContent = 'Loading MediaPipe...';
       try {
-        await Promise.all([
-          faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
-          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-        ]);
-        faceModelsReady = true;
-        faceStatusEl.textContent = 'Face detection ready';
-        registerBtn.disabled = !stream;
+        const vision = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        );
+        faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task',
+            delegate: 'GPU'
+          },
+          runningMode: 'VIDEO',
+          numFaces: 5,
+          minFaceDetectionConfidence: 0.4,
+          minTrackingConfidence: 0.4
+        });
+        mediapipeReady = true;
+        updateStatus();
+        console.log('MediaPipe FaceLandmarker loaded');
       } catch (err) {
-        faceStatusEl.textContent = 'Face model load failed';
-        console.error('Face model load error:', err);
+        console.error('MediaPipe load error:', err);
+        faceStatusEl.textContent = 'MediaPipe load failed';
       }
     }
 
-    // ── Head pose estimation from 68 landmarks ──
-    function estimateHeadPose(landmarks) {
-      const pts = landmarks.positions;
+    // ── Load face-api.js (recognition embeddings only) ──
+    const FACEAPI_MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/';
 
-      // Key landmarks:
-      // Nose tip: 30, Left jaw: 0, Right jaw: 16
-      // Left eye center: avg(36..41), Right eye center: avg(42..47)
-      const noseTip = pts[30];
-      const leftJaw = pts[0];
-      const rightJaw = pts[16];
-      const noseBridge = pts[27];
+    async function loadFaceApi() {
+      try {
+        await Promise.all([
+          faceapi.nets.ssdMobilenetv1.loadFromUri(FACEAPI_MODEL_URL),
+          faceapi.nets.faceLandmark68Net.loadFromUri(FACEAPI_MODEL_URL),
+          faceapi.nets.faceRecognitionNet.loadFromUri(FACEAPI_MODEL_URL)
+        ]);
+        faceapiReady = true;
+        updateStatus();
+        console.log('face-api.js recognition loaded');
+      } catch (err) {
+        console.error('face-api.js load error:', err);
+      }
+    }
 
-      // Yaw: compare nose-to-jaw distances on each side
-      const distLeft = Math.hypot(noseTip.x - leftJaw.x, noseTip.y - leftJaw.y);
-      const distRight = Math.hypot(noseTip.x - rightJaw.x, noseTip.y - rightJaw.y);
-      const yawRatio = distLeft / (distLeft + distRight); // 0.5 = frontal
+    function updateStatus() {
+      const parts = [];
+      if (mediapipeReady) parts.push('MediaPipe');
+      if (faceapiReady) parts.push('Recognition');
+      if (parts.length === 2) {
+        faceStatusEl.textContent = 'Face detection ready (MediaPipe + Recognition)';
+        registerBtn.disabled = !stream;
+      } else if (parts.length === 1) {
+        faceStatusEl.textContent = `Loading... (${parts[0]} ready)`;
+      } else {
+        faceStatusEl.textContent = 'Loading face models...';
+      }
+    }
 
-      // Pitch: compare nose tip vs nose bridge vertical offset relative to face height
-      const faceHeight = Math.hypot(noseBridge.x - pts[8].x, noseBridge.y - pts[8].y); // chin = 8
-      const noseDropRatio = (noseTip.y - noseBridge.y) / faceHeight;
+    // ── Head pose from MediaPipe 478 landmarks ──
+    function estimateHeadPose(landmarks, vw, vh) {
+      // Key MediaPipe landmarks:
+      // 1: nose bridge, 33: left eye outer, 263: right eye outer
+      // 61: left mouth corner, 291: right mouth corner
+      // 10: top of forehead, 152: chin bottom
+      // 234: left face edge, 454: right face edge
+      const nose = landmarks[1];
+      const leftEdge = landmarks[234];
+      const rightEdge = landmarks[454];
+      const forehead = landmarks[10];
+      const chin = landmarks[152];
 
-      // Classify yaw
+      // Yaw: nose position relative to face edges (using normalized x coords)
+      const distLeft = Math.abs(nose.x - leftEdge.x);
+      const distRight = Math.abs(nose.x - rightEdge.x);
+      const yawRatio = distLeft / (distLeft + distRight);
+
+      // Pitch: nose vertical position relative to forehead-chin span
+      const faceHeight = Math.abs(chin.y - forehead.y);
+      const noseRelative = (nose.y - forehead.y) / faceHeight;
+
+      // Z-based yaw (MediaPipe gives depth): compare left/right edge z
+      // More negative z = closer to camera
+      const zDiff = (leftEdge.z || 0) - (rightEdge.z || 0);
+
+      // Classify yaw — combine ratio + z depth for better accuracy
       let yaw;
-      if (yawRatio < 0.3) yaw = 'facing right';       // strong turn to their right
-      else if (yawRatio < 0.42) yaw = 'angled right';  // slight turn
-      else if (yawRatio > 0.7) yaw = 'facing left';
-      else if (yawRatio > 0.58) yaw = 'angled left';
+      if (yawRatio < 0.25 || zDiff > 0.06) yaw = 'profile right';
+      else if (yawRatio < 0.38 || zDiff > 0.03) yaw = 'angled right';
+      else if (yawRatio > 0.75 || zDiff < -0.06) yaw = 'profile left';
+      else if (yawRatio > 0.62 || zDiff < -0.03) yaw = 'angled left';
       else yaw = 'facing forward';
 
       // Classify pitch
       let pitch;
-      if (noseDropRatio > 0.52) pitch = 'looking down';
-      else if (noseDropRatio < 0.32) pitch = 'looking up';
-      else pitch = null; // neutral, don't mention
+      if (noseRelative > 0.55) pitch = 'looking down';
+      else if (noseRelative < 0.35) pitch = 'looking up';
+      else pitch = null;
 
-      // Build orientation string
       const parts = [yaw];
       if (pitch) parts.push(pitch);
 
@@ -665,67 +762,151 @@
         yaw,
         pitch,
         yawRatio: Math.round(yawRatio * 100) / 100,
+        zDiff: Math.round(zDiff * 1000) / 1000,
         orientation: parts.join(', ')
       };
     }
 
-    // ── Detect + identify faces in current video frame ──
-    async function detectAndIdentify() {
-      if (!faceModelsReady) return [];
+    // ── Compute bounding box from MediaPipe landmarks ──
+    function landmarksToBBox(landmarks, vw, vh) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const pt of landmarks) {
+        const px = pt.x * vw;
+        const py = pt.y * vh;
+        if (px < minX) minX = px;
+        if (py < minY) minY = py;
+        if (px > maxX) maxX = px;
+        if (py > maxY) maxY = py;
+      }
+      // Add some padding
+      const pad = Math.max(maxX - minX, maxY - minY) * 0.15;
+      return {
+        x: Math.max(0, minX - pad),
+        y: Math.max(0, minY - pad),
+        width: Math.min(vw, maxX - minX + pad * 2),
+        height: Math.min(vh, maxY - minY + pad * 2)
+      };
+    }
 
-      const detections = await faceapi
-        .detectAllFaces(video)
-        .withFaceLandmarks()
-        .withFaceDescriptors();
+    // ── Try to get face-api.js embedding for a face crop ──
+    async function getEmbeddingForCrop(box) {
+      if (!faceapiReady) return null;
 
-      if (!detections.length) return [];
+      // Crop the face region to a temp canvas, then run face-api on it
+      const cropCanvas = document.createElement('canvas');
+      const pad = Math.max(box.width, box.height) * 0.3;
+      const sx = Math.max(0, box.x - pad);
+      const sy = Math.max(0, box.y - pad);
+      const sw = Math.min(video.videoWidth - sx, box.width + pad * 2);
+      const sh = Math.min(video.videoHeight - sy, box.height + pad * 2);
+      cropCanvas.width = sw;
+      cropCanvas.height = sh;
+      const ctx = cropCanvas.getContext('2d');
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
 
-      return detections.map(det => {
-        const box = det.detection.box;
-        const descriptor = det.descriptor;
-        const pose = estimateHeadPose(det.landmarks);
+      try {
+        const det = await faceapi
+          .detectSingleFace(cropCanvas)
+          .withFaceLandmarks()
+          .withFaceDescriptor();
+        return det ? det.descriptor : null;
+      } catch {
+        return null;
+      }
+    }
 
-        // Find closest match in database
-        let bestMatch = { name: 'Unknown', distance: Infinity };
-        for (const entry of faceDatabase) {
-          const saved = new Float32Array(entry.descriptor);
-          const dist = faceapi.euclideanDistance(descriptor, saved);
+    // ── Euclidean distance ──
+    function euclidean(a, b) {
+      let sum = 0;
+      for (let i = 0; i < a.length; i++) {
+        const d = a[i] - b[i];
+        sum += d * d;
+      }
+      return Math.sqrt(sum);
+    }
+
+    // ── Match descriptor against database (supports multiple descriptors per entry) ──
+    function matchFace(descriptor) {
+      if (!descriptor || faceDatabase.length === 0) return { name: 'Unknown', identified: false, distance: Infinity };
+
+      let bestMatch = { name: 'Unknown', distance: Infinity };
+      for (const entry of faceDatabase) {
+        // Support both old format (single descriptor) and new (descriptors array)
+        const descList = entry.descriptors || [entry.descriptor];
+        for (const saved of descList) {
+          const dist = euclidean(descriptor, new Float32Array(saved));
           if (dist < bestMatch.distance) {
             bestMatch = { name: entry.name, distance: dist };
           }
         }
-
-        // Threshold: 0.6 is a good default for face-api.js
-        const identified = bestMatch.distance < 0.6;
-
-        return {
-          box,
-          name: identified ? bestMatch.name : 'Unknown',
-          distance: bestMatch.distance,
-          identified,
-          descriptor,
-          pose
-        };
-      });
+      }
+      const identified = bestMatch.distance < 0.6;
+      return {
+        name: identified ? bestMatch.name : 'Unknown',
+        identified,
+        distance: bestMatch.distance
+      };
     }
 
-    // ── Draw bounding boxes on overlay ──
+    // ── Main detection: MediaPipe for detection + pose, face-api for recognition ──
+    async function detectAndIdentify() {
+      if (!mediapipeReady) return [];
+
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return [];
+
+      const mpResult = faceLandmarker.detectForVideo(video, performance.now());
+      if (!mpResult.faceLandmarks || mpResult.faceLandmarks.length === 0) return [];
+
+      const faces = [];
+      for (const landmarks of mpResult.faceLandmarks) {
+        const box = landmarksToBBox(landmarks, vw, vh);
+        const pose = estimateHeadPose(landmarks, vw, vh);
+
+        // Only try recognition on roughly frontal faces
+        let match = { name: 'Unknown', identified: false, distance: Infinity };
+        const isFrontal = !pose.yaw.includes('profile');
+        if (isFrontal && faceapiReady && faceDatabase.length > 0) {
+          const descriptor = await getEmbeddingForCrop(box);
+          if (descriptor) {
+            match = matchFace(descriptor);
+          }
+        }
+
+        faces.push({
+          box,
+          landmarks,
+          pose,
+          name: match.name,
+          identified: match.identified,
+          distance: match.distance
+        });
+      }
+
+      return faces;
+    }
+
+    // ── Draw overlay ──
     function drawOverlay(faces) {
       const ctx = overlay.getContext('2d');
-      overlay.width = video.videoWidth;
-      overlay.height = video.videoHeight;
-      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      overlay.width = vw;
+      overlay.height = vh;
+      ctx.clearRect(0, 0, vw, vh);
 
       for (const face of faces) {
         const { box, name, identified, pose } = face;
-        const color = identified ? '#10b981' : '#666';
+        const isProfile = pose.yaw.includes('profile');
+        const color = identified ? '#10b981' : isProfile ? '#f59e0b' : '#666';
 
         ctx.strokeStyle = color;
         ctx.lineWidth = 2;
         ctx.strokeRect(box.x, box.y, box.width, box.height);
 
         // Name label (top)
-        const label = name;
+        const label = isProfile && !identified ? 'Side profile' : name;
         ctx.font = 'bold 14px -apple-system, sans-serif';
         const labelWidth = ctx.measureText(label).width;
         ctx.fillStyle = color;
@@ -734,33 +915,56 @@
         ctx.fillText(label, box.x + 5, box.y - 6);
 
         // Orientation label (bottom)
-        if (pose) {
-          ctx.font = '12px -apple-system, sans-serif';
-          const orientText = pose.orientation;
-          const orientWidth = ctx.measureText(orientText).width;
-          const ox = box.x;
-          const oy = box.y + box.height + 2;
-          ctx.fillStyle = 'rgba(0,0,0,0.6)';
-          ctx.fillRect(ox, oy, orientWidth + 8, 18);
-          ctx.fillStyle = '#c4b5fd';
-          ctx.fillText(orientText, ox + 4, oy + 13);
-        }
+        ctx.font = '12px -apple-system, sans-serif';
+        const orientText = pose.orientation;
+        const orientWidth = ctx.measureText(orientText).width;
+        const ox = box.x;
+        const oy = box.y + box.height + 2;
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(ox, oy, orientWidth + 8, 18);
+        ctx.fillStyle = '#c4b5fd';
+        ctx.fillText(orientText, ox + 4, oy + 13);
       }
     }
 
-    // ── Live overlay loop (runs face detection continuously) ──
+    // ── Live overlay loop ──
+    let lastOverlayTime = 0;
     async function overlayDetectionLoop() {
-      if (!stream || !faceModelsReady) return;
+      if (!stream || !mediapipeReady) return;
 
-      try {
-        const faces = await detectAndIdentify();
-        drawOverlay(faces);
-        const count = faces.length;
-        const known = faces.filter(f => f.identified).length;
-        faceStatusEl.textContent = count
-          ? `${count} face${count > 1 ? 's' : ''} (${known} known)`
-          : 'No faces detected';
-      } catch (e) { /* skip frame errors */ }
+      const now = performance.now();
+      // Throttle to ~15fps to keep UI responsive
+      if (now - lastOverlayTime > 66) {
+        lastOverlayTime = now;
+        try {
+          // For live overlay, just do MediaPipe detection + pose (skip recognition for speed)
+          const vw = video.videoWidth;
+          const vh = video.videoHeight;
+          if (vw && vh) {
+            const mpResult = faceLandmarker.detectForVideo(video, now);
+            const faces = (mpResult.faceLandmarks || []).map(landmarks => {
+              const box = landmarksToBBox(landmarks, vw, vh);
+              const pose = estimateHeadPose(landmarks, vw, vh);
+              return { box, pose, name: 'Unknown', identified: false };
+            });
+
+            // Quick-match known faces using cached descriptors (no face-api call)
+            // Full recognition runs on capture only
+            drawOverlay(faces);
+
+            const count = faces.length;
+            const profiles = faces.filter(f => f.pose.yaw.includes('profile')).length;
+            let statusText = '';
+            if (count === 0) {
+              statusText = 'No faces detected';
+            } else {
+              statusText = `${count} face${count > 1 ? 's' : ''}`;
+              if (profiles > 0) statusText += ` (${profiles} profile)`;
+            }
+            faceStatusEl.textContent = statusText;
+          }
+        } catch (e) { /* skip */ }
+      }
 
       overlayLoop = requestAnimationFrame(overlayDetectionLoop);
     }
@@ -774,11 +978,11 @@
         video.srcObject = stream;
         statusDot.classList.add('live');
         captureBtn.disabled = false;
-        registerBtn.disabled = !faceModelsReady;
+        registerBtn.disabled = !(mediapipeReady && faceapiReady);
         stopBtn.style.display = '';
 
         video.onloadeddata = () => {
-          if (faceModelsReady) overlayDetectionLoop();
+          if (mediapipeReady) overlayDetectionLoop();
         };
       } catch (err) {
         output.innerHTML = `<div class="entry"><p style="color:#fca5a5;">Camera access denied or unavailable: ${err.message}</p></div>`;
@@ -818,15 +1022,16 @@
       const dataUrl = captureFrame();
       const timestamp = new Date().toLocaleTimeString();
 
-      // Run face detection
+      // Full detection with recognition
       let faces = [];
-      if (faceModelsReady) {
+      if (mediapipeReady) {
         faces = await detectAndIdentify();
       }
 
-      // Build face context for the prompt
+      // Build face context
       const knownFaces = faces.filter(f => f.identified);
-      const unknownCount = faces.length - knownFaces.length;
+      const unknownCount = faces.filter(f => !f.identified && !f.pose.yaw.includes('profile')).length;
+      const profileCount = faces.filter(f => f.pose.yaw.includes('profile') && !f.identified).length;
       let faceContext = '';
 
       if (knownFaces.length > 0) {
@@ -837,22 +1042,27 @@
         });
         let ctx = `Known people in this image: ${descriptions.join('; ')}.`;
         if (unknownCount > 0) {
-          ctx += ` There ${unknownCount === 1 ? 'is' : 'are'} also ${unknownCount} other unidentified ${unknownCount === 1 ? 'person' : 'people'}.`;
+          ctx += ` There ${unknownCount === 1 ? 'is' : 'are'} also ${unknownCount} other unidentified ${unknownCount === 1 ? 'person' : 'people'} facing the camera.`;
+        }
+        if (profileCount > 0) {
+          ctx += ` ${profileCount} ${profileCount === 1 ? 'person is' : 'people are'} visible from the side.`;
         }
         faceContext = ctx + ' ';
       }
 
-      // Only use the faces prompt if we actually recognised someone
       const prompt = knownFaces.length > 0
         ? document.getElementById('promptFaces').value.replace('{{faces}}', faceContext)
         : document.getElementById('promptNoFaces').value;
 
-      // Add streaming entry
+      // UI entry
       const entry = document.createElement('div');
       entry.className = 'entry streaming';
 
       const faceLine = faces.length
-        ? `<div class="faces-detected">Detected: ${faces.map(f => `${f.name}${f.identified ? '' : ' (?)'} [${f.pose?.orientation || '?'}]`).join(', ')}</div>`
+        ? `<div class="faces-detected">Detected: ${faces.map(f => {
+            const label = f.identified ? f.name : (f.pose.yaw.includes('profile') ? 'Side profile' : 'Unknown (?)');
+            return `${label} [${f.pose?.orientation || '?'}]`;
+          }).join(', ')}</div>`
         : '';
 
       entry.innerHTML = `<div class="time">${timestamp}</div>${faceLine}<span class="text"></span><span class="cursor"></span>`;
@@ -902,7 +1112,6 @@
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed.startsWith('data: ')) continue;
-
             try {
               const json = JSON.parse(trimmed.slice(6));
               if (json.type === 'message.delta' && json.content) {
@@ -927,67 +1136,111 @@
       captureBtn.disabled = !stream;
     }
 
-    // Describe which part of the frame a face box is in
     function describePosition(box) {
       const cx = box.x + box.width / 2;
       const cy = box.y + box.height / 2;
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-
       const horizontal = cx < vw * 0.33 ? 'left' : cx > vw * 0.66 ? 'right' : 'center';
       const vertical = cy < vh * 0.33 ? 'top' : cy > vh * 0.66 ? 'bottom' : 'middle';
-
       if (horizontal === 'center' && vertical === 'middle') return 'center of frame';
       if (vertical === 'middle') return `${horizontal} side`;
       if (horizontal === 'center') return `${vertical} of frame`;
       return `${vertical}-${horizontal}`;
     }
 
-    // ── Registration ──
-    let pendingDescriptor = null;
+    // ── Multi-angle Registration ──
+    const REG_STEPS = [
+      { key: 'front', label: 'Look straight at the camera', canvas: 'cropFront', labelEl: 'labelFront' },
+      { key: 'left',  label: 'Turn your head to the LEFT',  canvas: 'cropLeft',  labelEl: 'labelLeft' },
+      { key: 'right', label: 'Turn your head to the RIGHT', canvas: 'cropRight', labelEl: 'labelRight' }
+    ];
 
-    async function openRegister() {
-      const modal = document.getElementById('registerModal');
-      const cropCanvas = document.getElementById('faceCrop');
+    let regStep = 0;
+    let regDescriptors = [];  // collected descriptors for each step
+    let regThumbnail = null;  // use frontal capture as thumbnail
+
+    function resetRegUI() {
+      regStep = 0;
+      regDescriptors = [];
+      regThumbnail = null;
+
       const regError = document.getElementById('regError');
       const regName = document.getElementById('regName');
       const regSaveBtn = document.getElementById('regSaveBtn');
+      const regCaptureBtn = document.getElementById('regCaptureBtn');
 
       regError.style.display = 'none';
+      regName.style.display = 'none';
       regName.value = '';
-      regSaveBtn.disabled = false;
-      pendingDescriptor = null;
+      regSaveBtn.style.display = 'none';
+      regCaptureBtn.style.display = '';
 
-      if (!faceModelsReady) {
-        regError.textContent = 'Face models not loaded yet.';
+      for (const step of REG_STEPS) {
+        const c = document.getElementById(step.canvas);
+        const ctx = c.getContext('2d');
+        ctx.clearRect(0, 0, 100, 100);
+        c.classList.remove('active', 'done');
+        document.getElementById(step.labelEl).className = 'reg-crop-label';
+      }
+
+      updateRegStepUI();
+    }
+
+    function updateRegStepUI() {
+      const stepLabel = document.getElementById('regStepLabel');
+      if (regStep < REG_STEPS.length) {
+        const step = REG_STEPS[regStep];
+        stepLabel.textContent = `Step ${regStep + 1}/3: ${step.label}`;
+        document.getElementById(step.canvas).classList.add('active');
+        document.getElementById(step.labelEl).classList.add('active');
+      } else {
+        stepLabel.textContent = 'All angles captured! Enter a name.';
+      }
+    }
+
+    async function openRegister() {
+      const modal = document.getElementById('registerModal');
+      const regError = document.getElementById('regError');
+
+      if (!faceapiReady) {
+        resetRegUI();
+        regError.textContent = 'Face recognition models not loaded yet.';
         regError.style.display = '';
         modal.classList.add('open');
         return;
       }
 
-      // Detect faces
+      resetRegUI();
+      modal.classList.add('open');
+    }
+
+    async function captureRegStep() {
+      if (regStep >= REG_STEPS.length) return;
+
+      const regError = document.getElementById('regError');
+      regError.style.display = 'none';
+
+      const step = REG_STEPS[regStep];
+      const cropCanvas = document.getElementById(step.canvas);
+
+      // Detect face
       const detections = await faceapi
         .detectAllFaces(video)
         .withFaceLandmarks()
         .withFaceDescriptors();
 
       if (detections.length === 0) {
-        regError.textContent = 'No face detected. Make sure your face is visible and try again.';
+        regError.textContent = 'No face detected. Adjust your position and try again.';
         regError.style.display = '';
-        const ctx = cropCanvas.getContext('2d');
-        ctx.clearRect(0, 0, 150, 150);
-        modal.classList.add('open');
         return;
       }
 
-      // Use the largest face (closest to camera)
       const best = detections.reduce((a, b) =>
         a.detection.box.area > b.detection.box.area ? a : b
       );
 
-      pendingDescriptor = Array.from(best.descriptor);
-
-      // Draw face crop
+      // Draw crop
       const box = best.detection.box;
       const pad = Math.max(box.width, box.height) * 0.3;
       const sx = Math.max(0, box.x - pad);
@@ -996,32 +1249,51 @@
       const sh = Math.min(video.videoHeight - sy, box.height + pad * 2);
 
       const ctx = cropCanvas.getContext('2d');
-      ctx.clearRect(0, 0, 150, 150);
-      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, 150, 150);
+      ctx.clearRect(0, 0, 100, 100);
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, 100, 100);
 
-      modal.classList.add('open');
-      setTimeout(() => regName.focus(), 100);
+      // Save descriptor
+      regDescriptors.push(Array.from(best.descriptor));
+
+      // Save frontal as thumbnail
+      if (regStep === 0) {
+        regThumbnail = cropCanvas.toDataURL('image/jpeg', 0.7);
+      }
+
+      // Mark step done
+      cropCanvas.classList.remove('active');
+      cropCanvas.classList.add('done');
+      document.getElementById(step.labelEl).classList.remove('active');
+      document.getElementById(step.labelEl).classList.add('done');
+
+      regStep++;
+
+      if (regStep >= REG_STEPS.length) {
+        // All steps done — show name input
+        document.getElementById('regCaptureBtn').style.display = 'none';
+        document.getElementById('regName').style.display = '';
+        document.getElementById('regSaveBtn').style.display = '';
+        updateRegStepUI();
+        setTimeout(() => document.getElementById('regName').focus(), 100);
+      } else {
+        updateRegStepUI();
+      }
     }
 
     function closeRegister() {
       document.getElementById('registerModal').classList.remove('open');
-      pendingDescriptor = null;
+      regDescriptors = [];
     }
 
     function saveRegistration() {
       const name = document.getElementById('regName').value.trim();
-      if (!name) return;
-      if (!pendingDescriptor) return;
-
-      const cropCanvas = document.getElementById('faceCrop');
-      const thumbnail = cropCanvas.toDataURL('image/jpeg', 0.7);
+      if (!name || regDescriptors.length === 0) return;
 
       faceDatabase.push({
         name,
-        descriptor: pendingDescriptor,
-        thumbnail
+        descriptors: regDescriptors,
+        thumbnail: regThumbnail || ''
       });
-
       saveFaceDB();
       renderFaceDB();
       closeRegister();
@@ -1063,10 +1335,24 @@
       }
     }
 
+    // ── Expose to onclick handlers ──
+    window.captureAndDescribe = captureAndDescribe;
+    window.openRegister = openRegister;
+    window.captureRegStep = captureRegStep;
+    window.closeRegister = closeRegister;
+    window.saveRegistration = saveRegistration;
+    window.stopStream = stopStream;
+    window.toggleAuto = toggleAuto;
+    window.checkConnection = checkConnection;
+    window.clearFaceDB = clearFaceDB;
+
     // ── Init ──
     renderFaceDB();
     startCamera();
-    loadFaceModels();
+    // Load both model sets in parallel
+    await Promise.all([loadMediaPipe(), loadFaceApi()]);
+    // Start overlay if camera is already running
+    if (stream && mediapipeReady) overlayDetectionLoop();
   </script>
 </body>
 </html>
